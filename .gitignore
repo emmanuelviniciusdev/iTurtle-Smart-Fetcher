@@ -6,7 +6,7 @@
 *.dylib
 
 # Go build artifacts
-iturtle-smart-fetcher
+./iturtle-smart-fetcher
 iturtle-smart-fetcher.exe
 *.test
 *.out
