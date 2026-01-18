@@ -1,0 +1,195 @@
+package downloader
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestIsURL(t *testing.T) {
+	if !isURL("https://example.com/video") {
+		t.Fatalf("expected URL to be valid")
+	}
+	if isURL("not-a-url") {
+		t.Fatalf("expected non URL to be invalid")
+	}
+}
+
+func TestPrepareCoverWithURL(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			body := io.NopCloser(strings.NewReader("image-bytes"))
+			return &http.Response{
+				StatusCode: 200,
+				Body:       body,
+				Header:     http.Header{},
+			}, nil
+		}),
+	}
+
+	dl := New(nil, client)
+	path, cleanup, err := dl.prepareCover(context.Background(), "https://example.com/cover.jpg")
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("prepareCover returned error: %v", err)
+	}
+	if path == "" {
+		t.Fatalf("expected a downloaded cover path")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected cover file to exist: %v", err)
+	}
+	if string(data) != "image-bytes" {
+		t.Fatalf("unexpected cover content: %s", string(data))
+	}
+}
+
+func TestBuildFFmpegArgsWithCoverAndMetadata(t *testing.T) {
+	meta := Metadata{
+		Title:       "Song",
+		Artist:      "Artist",
+		Album:       "Album",
+		AlbumArtist: "Album Artist",
+		Composer:    "Composer",
+		Year:        "2024",
+		Genre:       "Genre",
+		Track:       "1",
+		Comment:     "Note",
+	}
+
+	args := buildFFmpegArgs("in.mp3", "out.mp3", meta, "cover.jpg")
+	argsJoined := strings.Join(args, " ")
+
+	expected := []string{
+		"cover.jpg",
+		"artist=Artist",
+		"album=Album",
+		"title=Song",
+		"attached_pic",
+		"out.mp3",
+	}
+
+	for _, val := range expected {
+		if !strings.Contains(argsJoined, val) {
+			t.Fatalf("expected ffmpeg args to contain %q; args: %s", val, argsJoined)
+		}
+	}
+}
+
+func TestDownloadFlowCreatesAndTagsFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	runner := &fakeRunner{audioFormat: "mp3"}
+	dl := New(runner, nil)
+
+	cfg := Config{
+		URL:         "https://example.com/playlist",
+		OutputDir:   tempDir,
+		AudioFormat: "mp3",
+		Metadata: Metadata{
+			Artist: "Tester",
+			Album:  "Album",
+			Year:   "2024",
+		},
+	}
+
+	files, err := dl.Download(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+
+	if len(files) != 2 {
+		t.Fatalf("expected 2 files, got %d (%v)", len(files), files)
+	}
+
+	for _, file := range files {
+		if !strings.HasSuffix(file, ".mp3") {
+			t.Fatalf("expected mp3 extension for %s", file)
+		}
+		if _, err := os.Stat(filepath.Join(tempDir, file)); err != nil {
+			t.Fatalf("expected file to exist: %v", err)
+		}
+	}
+
+	ffmpegCalls := 0
+	for _, call := range runner.calls {
+		if call.name == "ffmpeg" {
+			ffmpegCalls++
+		}
+	}
+	if ffmpegCalls != len(files) {
+		t.Fatalf("expected ffmpeg to be called %d times, got %d", len(files), ffmpegCalls)
+	}
+}
+
+func TestDownloadRequiresURL(t *testing.T) {
+	dl := New(&fakeRunner{}, nil)
+	_, err := dl.Download(context.Background(), Config{OutputDir: t.TempDir()})
+	if err == nil {
+		t.Fatalf("expected error for missing URL")
+	}
+}
+
+type fakeRunner struct {
+	audioFormat string
+	calls       []cmdCall
+}
+
+type cmdCall struct {
+	name string
+	args []string
+}
+
+func (f *fakeRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	f.calls = append(f.calls, cmdCall{name: name, args: append([]string{}, args...)})
+
+	switch name {
+	case "yt-dlp":
+		outDir := extractOutputDir(args)
+		if outDir == "" {
+			return "", errors.New("missing -o argument for yt-dlp")
+		}
+		if err := os.MkdirAll(outDir, 0o755); err != nil {
+			return "", err
+		}
+		for i := 1; i <= 2; i++ {
+			path := filepath.Join(outDir, fmt.Sprintf("track%d.%s", i, f.audioFormat))
+			if err := os.WriteFile(path, []byte("audio"), 0o644); err != nil {
+				return "", err
+			}
+		}
+		return "ok", nil
+	case "ffmpeg":
+		if len(args) == 0 {
+			return "", errors.New("ffmpeg missing args")
+		}
+		output := args[len(args)-1]
+		if err := os.WriteFile(output, []byte("tagged"), 0o644); err != nil {
+			return "", err
+		}
+		return "ok", nil
+	default:
+		return "", fmt.Errorf("unexpected command: %s", name)
+	}
+}
+
+func extractOutputDir(args []string) string {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-o" {
+			return filepath.Dir(args[i+1])
+		}
+	}
+	return ""
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
