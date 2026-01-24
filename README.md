@@ -5,14 +5,17 @@ A zero-dependency Go CLI utility for downloading music from YouTube and embeddin
 ## Features
 
 - **YouTube Downloads**: Fetch single videos or complete playlists via `yt-dlp`
+- **Highest Quality Audio**: Downloads at the highest available audio quality (VBR quality 0)
 - **Audio Extraction**: Save as MP3 (default) or other audio formats to any target directory
 - **Rich Metadata Embedding**: Apply ID3 tags including title, artist, album, album artist, composer, year/date, genre, track number, and comments
+- **Per-Track Metadata**: Apply different metadata to each track in a playlist
+- **MusicBrainz Integration**: Auto-fetch album and track metadata from MusicBrainz database
+- **Cover Art Archive**: Automatically retrieve album cover art from Cover Art Archive
 - **Cover Art Support**: Embed cover art from local files or URLs using `ffmpeg`
+- **Batch Configuration**: Process multiple albums from a YAML configuration file
 - **Safe Tagging**: Only files created by the current run are modified—existing files are never touched
-- **Batch Processing**: Download entire playlists with uniform metadata applied to all tracks
-- **Progress Feedback**: Beautiful turtle-themed progress indicators 🐢 with real-time download and tagging status
+- **Progress Feedback**: Beautiful turtle-themed progress indicators with real-time download and tagging status
 - **Cross-Platform**: Supports Linux (x86-64, x86, ARM64), macOS (x86-64, ARM64), and Windows (x86-64, x86)
-- **Zero Go Dependencies**: Built entirely with Go's standard library
 
 ## Requirements
 
@@ -120,13 +123,41 @@ iturtle-smart-fetcher \
   -artist "Artist Name"
 ```
 
+### Fetch Metadata from MusicBrainz
+
+```bash
+# By MusicBrainz release ID
+iturtle-smart-fetcher \
+  -url "https://youtube.com/playlist?list=PLAYLIST_ID" \
+  -musicbrainz-id "abc-123-def-456" \
+  -out ./music
+
+# Or auto-search by artist and album name
+iturtle-smart-fetcher \
+  -url "https://youtube.com/playlist?list=PLAYLIST_ID" \
+  -auto-fetch-metadata "Black Kids - Partie Traumatic" \
+  -out ./music
+```
+
+### Batch Mode with Configuration File
+
+```bash
+# Generate example configuration file
+iturtle-smart-fetcher -example-config > albums.yaml
+
+# Edit the file with your albums...
+
+# Run batch download
+iturtle-smart-fetcher -config albums.yaml
+```
+
 ## CLI Reference
 
 ### Required Flags
 
 | Flag | Description |
 |------|-------------|
-| `-url` | YouTube video or playlist URL |
+| `-url` | YouTube video or playlist URL (required unless `-config` is used) |
 
 ### Output Options
 
@@ -152,6 +183,25 @@ iturtle-smart-fetcher \
 
 **Note on Metadata Behavior**: All metadata flags are optional. If a metadata field is not specified, the original metadata extracted by `yt-dlp` from YouTube (such as video title, uploader name, etc.) is preserved in the downloaded file. Only the metadata fields you explicitly provide will override the YouTube-extracted values.
 
+### MusicBrainz Integration
+
+| Flag | Description |
+|------|-------------|
+| `-musicbrainz-id` | MusicBrainz release ID to fetch album and track metadata |
+| `-auto-fetch-metadata` | Auto-search MusicBrainz (format: "Artist - Album") |
+
+When using MusicBrainz integration, the tool will:
+- Fetch complete album metadata (title, artist, year, label, etc.)
+- Retrieve per-track metadata (title, duration, ISRC, etc.)
+- Automatically download cover art from Cover Art Archive if available
+
+### Batch Configuration
+
+| Flag | Description |
+|------|-------------|
+| `-config` | Path to YAML batch configuration file |
+| `-example-config` | Print example configuration file and exit |
+
 ### Tool Path Overrides
 
 | Flag | Default | Description |
@@ -160,6 +210,64 @@ iturtle-smart-fetcher \
 | `-ffmpeg-path` | (searches PATH) | Path to `ffmpeg` binary |
 
 By default, the tool searches for `yt-dlp` and `ffmpeg` in your system PATH. Use these flags to specify custom locations if needed.
+
+## Batch Configuration File
+
+The batch configuration file allows you to process multiple albums in a single run. Create a YAML file with the following structure:
+
+```yaml
+# albums.yaml
+albums:
+  # Example 1: Manual metadata with per-track info
+  - url: "https://youtube.com/playlist?list=PLxxxxxx"
+    artist: "Black Kids"
+    album: "Partie Traumatic"
+    year: "2008"
+    genre: "Indie Pop"
+    cover: "https://example.com/cover.jpg"
+    output_dir: "./music/Black Kids"
+    tracks:
+      - {num: 1, title: "Hit The Heartbrakes"}
+      - {num: 2, title: "Partie Traumatic"}
+      - {num: 3, title: "I'm Not Gonna Teach Your Boyfriend How to Dance with You"}
+
+  # Example 2: Auto-fetch from MusicBrainz by ID
+  - url: "https://youtube.com/playlist?list=PLyyyyyy"
+    musicbrainz_id: "abc-123-def-456"
+    output_dir: "./music/Motion City Soundtrack"
+
+  # Example 3: Auto-search MusicBrainz
+  - url: "https://youtube.com/playlist?list=PLzzzzzz"
+    auto_fetch: "Motion City Soundtrack - Commit This to Memory"
+    output_dir: "./music/Motion City Soundtrack"
+```
+
+### Configuration Fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `url` | Yes | YouTube video or playlist URL |
+| `artist` | No | Album artist |
+| `album` | No | Album title |
+| `album_artist` | No | Album artist (for compilations) |
+| `year` | No | Release year |
+| `genre` | No | Music genre |
+| `cover` | No | Local path or URL to cover art |
+| `output_dir` | No | Output directory (defaults to current directory) |
+| `musicbrainz_id` | No | MusicBrainz release ID for auto-fetch |
+| `auto_fetch` | No | Auto-search query (format: "Artist - Album") |
+| `tracks` | No | Per-track metadata overrides |
+
+### Track Configuration Fields
+
+| Field | Description |
+|-------|-------------|
+| `num` | Track number/position |
+| `title` | Track title |
+| `artist` | Track artist (if different from album artist) |
+| `composer` | Track composer |
+| `duration` | Track duration |
+| `comment` | Track comment |
 
 ## How It Works
 
@@ -238,17 +346,27 @@ The tool manager follows this simple resolution order for both `yt-dlp` and `ffm
 iturtle-smart-fetcher/
 ├── cmd/
 │   └── iturtle-smart-fetcher/
-│       └── main.go              # CLI entry point, flag parsing
+│       └── main.go              # CLI entry point, flag parsing, batch mode
 ├── internal/
+│   ├── config/
+│   │   ├── config.go            # YAML batch configuration parsing
+│   │   └── config_test.go       # Configuration tests
 │   ├── downloader/
 │   │   ├── downloader.go        # Core download and tagging orchestration
 │   │   ├── downloader_test.go   # Unit tests with mocked dependencies
-│   │   ├── metadata.go          # Config and Metadata type definitions
+│   │   ├── metadata.go          # Config, Metadata, and PlaylistMetadata types
+│   │   ├── progress.go          # Turtle-themed progress printer
 │   │   └── runner.go            # Command execution interface
+│   ├── musicbrainz/
+│   │   ├── musicbrainz.go       # MusicBrainz API client
+│   │   ├── musicbrainz_test.go  # API client tests
+│   │   ├── converter.go         # Convert MusicBrainz data to PlaylistMetadata
+│   │   └── converter_test.go    # Converter tests
 │   └── tools/
-│       ├── tools.go             # Tool resolution and auto-download
+│       ├── tools.go             # Tool resolution
 │       └── tools_test.go        # Unit tests
-├── go.mod                       # Go module (1.25.5, zero dependencies)
+├── go.mod                       # Go module
+├── go.sum                       # Dependency checksums
 └── README.md
 ```
 
@@ -257,13 +375,14 @@ iturtle-smart-fetcher/
 ```go
 // Config defines the parameters for a download run
 type Config struct {
-    URL         string   // YouTube video or playlist URL (required)
-    OutputDir   string   // Output directory for downloads
-    Cover       string   // Local file path or URL to cover image
-    AudioFormat string   // Audio format (default: "mp3")
-    YtDLPPath   string   // Path to yt-dlp binary
-    FFmpegPath  string   // Path to ffmpeg binary
-    Metadata    Metadata // Metadata to embed
+    URL              string            // YouTube video or playlist URL (required)
+    OutputDir        string            // Output directory for downloads
+    Cover            string            // Local file path or URL to cover image
+    AudioFormat      string            // Audio format (default: "mp3")
+    YtDLPPath        string            // Path to yt-dlp binary
+    FFmpegPath       string            // Path to ffmpeg binary
+    Metadata         Metadata          // Metadata to embed (uniform for all tracks)
+    PlaylistMetadata *PlaylistMetadata // Per-track metadata for playlists
 }
 
 // Metadata holds ID3 tags to embed into audio files
@@ -277,6 +396,25 @@ type Metadata struct {
     Genre       string
     Track       string
     Comment     string
+}
+
+// PlaylistMetadata combines album-level and per-track metadata
+type PlaylistMetadata struct {
+    AlbumInfo AlbumMetadata
+    Tracks    []TrackMetadata
+}
+
+// TrackMetadata holds per-track metadata for playlist downloads
+type TrackMetadata struct {
+    Position   int    // Track position in the playlist/album
+    Title      string // Track title
+    Duration   string // Track duration (e.g., "3:45")
+    Artist     string // Track artist (if different from album artist)
+    Composer   string // Track composer
+    ISRC       string // International Standard Recording Code
+    DiscNumber int    // Disc number for multi-disc albums
+    TotalDiscs int    // Total number of discs
+    Comment    string // Per-track comment
 }
 ```
 
@@ -400,8 +538,9 @@ make test-coverage
 ## Limitations
 
 - **External Dependencies**: Requires `yt-dlp` and `ffmpeg` to be installed separately (not pure Go implementations)
-- **Uniform Metadata**: All tracks in a playlist receive the same metadata; per-track overrides are not yet supported
 - **Audio Formats**: While other formats are supported, MP3 is recommended for best ID3 tag compatibility
+- **Track Matching**: Per-track metadata matching relies on playlist order; tracks must be downloaded in the same order as specified in metadata
+- **MusicBrainz Rate Limiting**: The MusicBrainz API limits requests to 1 per second; batch operations may take time for large collections
 
 ## Examples
 

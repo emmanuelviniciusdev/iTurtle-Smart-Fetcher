@@ -91,7 +91,16 @@ func (d *Downloader) Download(ctx context.Context, cfg Config) ([]string, error)
 		d.progress.PrintFile(file)
 	}
 
-	coverPath, cleanup, err := d.prepareCover(ctx, cfg.Cover)
+	// Determine cover path - check playlist metadata first, then config
+	coverSource := cfg.Cover
+	if cfg.PlaylistMetadata != nil && cfg.PlaylistMetadata.AlbumInfo.CoverURL != "" {
+		coverSource = cfg.PlaylistMetadata.AlbumInfo.CoverURL
+	}
+	if cfg.PlaylistMetadata != nil && cfg.PlaylistMetadata.AlbumInfo.CoverPath != "" {
+		coverSource = cfg.PlaylistMetadata.AlbumInfo.CoverPath
+	}
+
+	coverPath, cleanup, err := d.prepareCover(ctx, coverSource)
 	if err != nil {
 		d.progress.PrintWarning(fmt.Sprintf("Cover preparation failed: %v", err))
 	}
@@ -102,7 +111,8 @@ func (d *Downloader) Download(ctx context.Context, cfg Config) ([]string, error)
 		cfg.Metadata.Album != "" || cfg.Metadata.AlbumArtist != "" ||
 		cfg.Metadata.Composer != "" || cfg.Metadata.Year != "" ||
 		cfg.Metadata.Genre != "" || cfg.Metadata.Track != "" ||
-		cfg.Metadata.Comment != "" || coverPath != ""
+		cfg.Metadata.Comment != "" || coverPath != "" ||
+		cfg.PlaylistMetadata != nil
 
 	if hasMetadata {
 		d.progress.PrintSection("Applying Metadata")
@@ -115,7 +125,14 @@ func (d *Downloader) Download(ctx context.Context, cfg Config) ([]string, error)
 
 		for i, file := range newFiles {
 			d.progress.PrintProgress(fmt.Sprintf("Tagging %d/%d: %s", i+1, len(newFiles), filepath.Base(file)))
-			if err := d.applyMetadata(ctx, ffmpegCmd, filepath.Join(cfg.OutputDir, file), coverPath, cfg.Metadata); err != nil {
+
+			// Determine metadata for this file
+			meta := cfg.Metadata
+			if cfg.PlaylistMetadata != nil {
+				meta = d.getTrackMetadata(cfg.PlaylistMetadata, file, i)
+			}
+
+			if err := d.applyMetadata(ctx, ffmpegCmd, filepath.Join(cfg.OutputDir, file), coverPath, meta); err != nil {
 				d.progress.ClearLine()
 				d.progress.PrintError(fmt.Sprintf("Failed to tag %s: %v", file, err))
 				return newFiles, err
@@ -132,10 +149,12 @@ func (d *Downloader) Download(ctx context.Context, cfg Config) ([]string, error)
 }
 
 func buildYtDlpArgs(url, outputDir, format string) []string {
-	template := filepath.Join(outputDir, "%(title)s.%(ext)s")
+	// Use playlist index in filename to ensure proper ordering for per-track metadata
+	template := filepath.Join(outputDir, "%(playlist_index|0)s - %(title)s.%(ext)s")
 	return []string{
 		"--extract-audio",
 		"--audio-format", format,
+		"--audio-quality", "0", // Highest quality (0 = best, 10 = worst for VBR)
 		"--prefer-ffmpeg",
 		"--yes-playlist",
 		"--ignore-errors",
@@ -295,4 +314,44 @@ func isURL(value string) bool {
 		return false
 	}
 	return u.Scheme != "" && u.Host != ""
+}
+
+// getTrackMetadata determines the metadata for a specific file based on playlist metadata.
+// It tries to match by playlist index in the filename, falling back to position-based matching.
+func (d *Downloader) getTrackMetadata(pm *PlaylistMetadata, filename string, fileIndex int) Metadata {
+	// Try to extract playlist index from filename (format: "N - title.ext")
+	trackIndex := extractPlaylistIndex(filename)
+	if trackIndex <= 0 {
+		// Fall back to file index (1-based)
+		trackIndex = fileIndex + 1
+	}
+
+	// Find matching track metadata
+	var trackMeta TrackMetadata
+	if trackIndex > 0 && trackIndex <= len(pm.Tracks) {
+		trackMeta = pm.Tracks[trackIndex-1]
+	} else if len(pm.Tracks) > fileIndex {
+		trackMeta = pm.Tracks[fileIndex]
+	}
+
+	return MergeTrackMetadata(pm.AlbumInfo, trackMeta, trackIndex)
+}
+
+// extractPlaylistIndex extracts the playlist index from a filename.
+// Expected format: "N - title.ext" where N is the playlist index.
+func extractPlaylistIndex(filename string) int {
+	base := filepath.Base(filename)
+	// Look for pattern "N - " at the start
+	for i, c := range base {
+		if c == ' ' && i > 0 && i+2 < len(base) && base[i+1] == '-' && base[i+2] == ' ' {
+			// Parse the number before the dash
+			numStr := base[:i]
+			var num int
+			if _, err := fmt.Sscanf(numStr, "%d", &num); err == nil {
+				return num
+			}
+			break
+		}
+	}
+	return 0
 }
